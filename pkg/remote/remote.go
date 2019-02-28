@@ -1,14 +1,16 @@
 package remote
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
+	"fmt"
 	"git.poundadm.net/anachronism/xmcctl/pkg/apis/v1"
 	log "github.com/sirupsen/logrus"
 	"net"
 )
 
-type EmotivaRemote struct {
+type Remote struct {
 	Name          string
 	Model         string
 	ControlAddr   net.UDPAddr
@@ -17,8 +19,8 @@ type EmotivaRemote struct {
 	Subscriptions []string
 }
 
-func NewEmotivaRemote(name string, model string, controlAddr net.UDPAddr, notifyAddr net.UDPAddr, infoAddr net.UDPAddr) *EmotivaRemote {
-	return &EmotivaRemote{
+func NewRemote(name string, model string, controlAddr net.UDPAddr, notifyAddr net.UDPAddr, infoAddr net.UDPAddr) *Remote {
+	return &Remote{
 		Name:        name,
 		Model:       model,
 		ControlAddr: controlAddr,
@@ -27,8 +29,8 @@ func NewEmotivaRemote(name string, model string, controlAddr net.UDPAddr, notify
 	}
 }
 
-func NewEmotivaRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1.TransponderResponse) *EmotivaRemote {
-	r := NewEmotivaRemote(
+func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1.TransponderResponse) *Remote {
+	r := NewRemote(
 		tr.Name,
 		tr.Model,
 		net.UDPAddr{
@@ -47,41 +49,107 @@ func NewEmotivaRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1.Transponde
 	return r
 }
 
-// DiscoverTransponders broadcasts a discovery packet and listens for responses on the
-// passed bindAddr
-func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr) []*EmotivaRemote {
+func sendDiscoveryPacket(dstAddr *net.UDPAddr) error {
+	packet := bytes.NewBuffer([]byte{})
+	packet.Write([]byte(xml.Header))
+	data, err := xml.Marshal(v1.Ping{})
+	if err != nil {
+		return err
+	}
+	packet.Write(data)
+
+	// Create a connection without peers to send the broadcast packet on
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+	defer conn.Close()
+	if err != nil {
+		return err
+	}
+
+	nbytes, err := conn.WriteToUDP(packet.Bytes(), dstAddr)
+	if err != nil {
+		return err
+	}
+	log.WithFields(log.Fields{
+		"addr":   dstAddr.String(),
+		"nbytes": nbytes,
+		"data":   fmt.Sprintf("%s", packet.Bytes()),
+	}).Debug("sent discovery packet")
+
+	return nil
+}
+
+// DiscoverTransponders broadcasts a discovery packet and listens for responses on the passed bindAddr
+func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddr *net.UDPAddr) ([]*Remote, error) {
+	found := make([]*Remote, 0)
+	remotes := make(chan *Remote, 10)
+
 	// bind to the port identity responses will be sent to
 	listener, err := net.ListenUDP("udp", bindAddr)
+	defer listener.Close()
 	if err != nil {
 		log.WithFields(log.Fields{
 			"addr": bindAddr,
 			"err":  err,
 		}).Error("unable to bind to discovery response port")
+		return found, err
+	}
+
+	// send the discovery packet
+	err = sendDiscoveryPacket(dstAddr)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"err": err,
+		}).Error("error sending discovery packet")
+		return found, err
 	}
 
 	// setup a routine to loop over all responses received by the listener
-	remotes := make(chan *EmotivaRemote, 10)
 	go func() {
-		respPacket := make([]byte, 0, 2048)
+		respPacket := make([]byte, 2048)
+		log.Debug("awaiting identity responses")
 		for {
 			// if our parent context was closed, exit the read loop
 			select {
 			case <-ctx.Done():
-				break
+				log.Info("context closed, discovery listener terminating")
+				return
 			default:
 			}
 
 			// we'll need the remote address from the packets to build the remotes
 			_, raddr, err := listener.ReadFromUDP(respPacket)
 			if err != nil {
+				// handle errors returned by the reader based on type
+				if operr, ok := err.(*net.OpError); ok {
+					fs := log.Fields{
+						"err":  operr,
+						"errT": fmt.Sprintf("%T", operr),
+					}
+					if operr.Temporary() {
+						// if the error indicates that it's temporary, retry
+						log.WithFields(fs).Warn("temporary operror while reading discovery responses")
+						continue
+					} else if operr.Err.Error() == "use of closed network connection" {
+						// if the nested error is due to the connection closing, we're done
+						log.WithFields(fs).Debug("discovery listener connection closed")
+						return
+					} else {
+						// log unknowns
+						log.WithFields(fs).Error("unknown operror while reading discovery responses")
+						return
+					}
+				}
+				// if the error isn't a known type, also log its type for debugging and retry
 				log.WithFields(log.Fields{
 					"addr": raddr,
 					"err":  err,
-				}).Error("error reading ident response packet")
+					"errt": fmt.Sprintf("%T", err),
+				}).Error("unknown error reading ident response packet")
+				continue
 			}
 
-			var tr v1.TransponderResponse
-			err = xml.Unmarshal(respPacket, tr)
+			tr := v1.TransponderResponse{}
+			err = xml.Unmarshal(respPacket, &tr)
 			if err != nil {
 				// if we encounter a decoding error, log it, reset the buffer, and loop again
 				log.WithFields(log.Fields{
@@ -100,7 +168,7 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr) []*Emotiva
 			// otherwise, just clear the packet buffer
 			respPacket = respPacket[0:0]
 
-			remote := NewEmotivaRemoteFromTransponderResponse(
+			remote := NewRemoteFromTransponderResponse(
 				raddr,
 				tr,
 			)
@@ -108,12 +176,24 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr) []*Emotiva
 		}
 	}()
 
-	found := make([]*EmotivaRemote, 0)
-	select {
-	case <-ctx.Done():
-		log.Info("discovery timeout reached")
-	case r := <-remotes:
-		found = append(found, r)
+	// once the receiver loop is setup, process the results it sends over its channel or wait
+	// for our context to be closed
+	for {
+		select {
+		case <-ctx.Done():
+			// if our context is closed, our work is done and we should return results
+			log.Info("discovery context closing")
+			// close the listener connection, this will cause the receiver loop to exit
+			err := listener.Close()
+			if err != nil {
+				log.WithFields(log.Fields{
+					"err": err,
+				}).Debug("error closing discovery listener?")
+			}
+			return found, nil
+		case r := <-remotes:
+			// as new results are found, copy them into our results slice
+			found = append(found, r)
+		}
 	}
-	return found
 }
