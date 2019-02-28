@@ -7,6 +7,18 @@ const (
 	SelfIdentityResponsePort = 7001
 )
 
+type NotificationTag int
+
+func (t NotificationTag) String() string {
+	return NotificationTagStrings[t]
+}
+
+type CommandTag int
+
+func (t CommandTag) String() string {
+	return CommandTagStrings[t]
+}
+
 type SelfIdentityRequest struct {
 	XMLName xml.Name `xml:"emotivaPing"`
 }
