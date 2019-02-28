@@ -10,13 +10,12 @@ def const_case(astr):
         else:
             capped.append(t.capitalize())
     return ''.join(capped)
+print '''// The code in this file is generated!
+// If you want to change it, update hack/gen.py'''
 
 with open('command_tags') as infd:
     lines = [l.strip() for l in sorted(infd)]
-print '''
-package v1
-
-type CommandTag int
+print '''package v1
 
 const (
 \t%sCommand CommandTag = iota''' % const_case(lines[0])
@@ -25,7 +24,7 @@ for line in lines[1:]:
 
 print ''')
 
-var CommandTagStrings = []String{'''
+var CommandTagStrings = []string{'''
 for line in lines:
     print '\t"%s",' % line
 print '}'
@@ -34,15 +33,13 @@ print
 with open('notification_tags') as infd:
     lines = [l.strip() for l in sorted(infd)]
 print '''
-type NotificationTag int
-
 const (
 \t%sNotification NotificationTag = iota''' % const_case(lines[0])
 for line in lines[1:]:
     print '\t%sNotification' % const_case(line)
 print ''')
 
-var NotificationTagStrings = []String{'''
+var NotificationTagStrings = []string{'''
 for line in lines:
     print '\t"%s",' % line
 print '}'

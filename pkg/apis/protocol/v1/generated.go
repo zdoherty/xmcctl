@@ -1,6 +1,6 @@
+// The code in this file is generated!
+// If you want to change it, update hack/gen.py
 package v1
-
-type CommandTag int
 
 const (
 	ARCCommand CommandTag = iota
@@ -145,7 +145,7 @@ const (
 	Zone2VolumeCommand
 )
 
-var CommandTagStrings = []String{
+var CommandTagStrings = []string{
 	"ARC",
 	"all_stereo",
 	"analog1",
@@ -288,7 +288,6 @@ var CommandTagStrings = []String{
 	"zone2_volume",
 }
 
-type NotificationTag int
 
 const (
 	AudioBitsNotification NotificationTag = iota
@@ -335,7 +334,7 @@ const (
 	Zone2VolumeNotification
 )
 
-var NotificationTagStrings = []String{
+var NotificationTagStrings = []string{
 	"audio_bits",
 	"audio_bitstream",
 	"audio_input",
@@ -379,3 +378,4 @@ var NotificationTagStrings = []String{
 	"zone2_power",
 	"zone2_volume",
 }
+
