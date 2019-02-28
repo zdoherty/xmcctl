@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"git.poundadm.net/anachronism/xmcctl/pkg/apis/v1alpha1"
+	protov1 "git.poundadm.net/anachronism/xmcctl/pkg/apis/protocol/v1"
 	log "github.com/sirupsen/logrus"
 	"net"
 )
@@ -29,7 +29,7 @@ func NewRemote(name string, model string, controlAddr net.UDPAddr, notifyAddr ne
 	}
 }
 
-func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1alpha1.TransponderResponse) *Remote {
+func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr protov1.SelfIdentityResponse) *Remote {
 	r := NewRemote(
 		tr.Name,
 		tr.Model,
@@ -52,7 +52,7 @@ func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1alpha1.Transponder
 func sendDiscoveryPacket(dstAddr *net.UDPAddr) error {
 	packet := bytes.NewBuffer([]byte{})
 	packet.Write([]byte(xml.Header))
-	data, err := xml.Marshal(v1alpha1.Ping{})
+	data, err := xml.Marshal(protov1.SelfIdentityRequest{})
 	if err != nil {
 		return err
 	}
@@ -79,28 +79,36 @@ func sendDiscoveryPacket(dstAddr *net.UDPAddr) error {
 }
 
 // DiscoverTransponders broadcasts a discovery packet and listens for responses on the passed bindAddr
-func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddrs []*net.UDPAddr) ([]*Remote, error) {
+func DiscoverTransponders(ctx context.Context, bind net.IP, dests []net.IP) ([]*Remote, error) {
 	found := make([]*Remote, 0)
 	remotes := make(chan *Remote, 10)
 
 	// bind to the port identity responses will be sent to
+	bindAddr := &net.UDPAddr{
+		IP:   bind,
+		Port: protov1.SelfIdentityResponsePort,
+	}
 	listener, err := net.ListenUDP("udp", bindAddr)
 	defer listener.Close()
 	if err != nil {
 		log.WithFields(log.Fields{
-			"addr": bindAddr,
+			"addr": bind,
 			"err":  err,
 		}).Error("unable to bind to discovery response port")
 		return found, err
 	}
 
 	// send the discovery packet
-	for _, addr := range dstAddrs {
-		err = sendDiscoveryPacket(addr)
+	for _, dest := range dests {
+		destAddr := &net.UDPAddr{
+			IP:   dest,
+			Port: protov1.SelfIdentityRequestPort,
+		}
+		err = sendDiscoveryPacket(destAddr)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"err":  err,
-				"addr": addr,
+				"addr": destAddr,
 			}).Error("error sending discovery packet")
 			return found, err
 		}
@@ -150,8 +158,12 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddrs [
 				}).Error("unknown error reading ident response packet")
 				continue
 			}
+			log.WithFields(log.Fields{
+				"addr": raddr,
+				"body": string(bytes.Trim(respPacket, "\x00")),
+			}).Debug("got packet on ident response port")
 
-			tr := v1alpha1.TransponderResponse{}
+			tr := protov1.SelfIdentityResponse{}
 			err = xml.Unmarshal(respPacket, &tr)
 			if err != nil {
 				// if we encounter a decoding error, log it, reset the buffer, and loop again
