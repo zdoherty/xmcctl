@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
-	"git.poundadm.net/anachronism/xmcctl/pkg/apis/v1"
+	"git.poundadm.net/anachronism/xmcctl/pkg/apis/v1alpha1"
 	log "github.com/sirupsen/logrus"
 	"net"
 )
@@ -29,7 +29,7 @@ func NewRemote(name string, model string, controlAddr net.UDPAddr, notifyAddr ne
 	}
 }
 
-func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1.TransponderResponse) *Remote {
+func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1alpha1.TransponderResponse) *Remote {
 	r := NewRemote(
 		tr.Name,
 		tr.Model,
@@ -52,7 +52,7 @@ func NewRemoteFromTransponderResponse(addr *net.UDPAddr, tr v1.TransponderRespon
 func sendDiscoveryPacket(dstAddr *net.UDPAddr) error {
 	packet := bytes.NewBuffer([]byte{})
 	packet.Write([]byte(xml.Header))
-	data, err := xml.Marshal(v1.Ping{})
+	data, err := xml.Marshal(v1alpha1.Ping{})
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func sendDiscoveryPacket(dstAddr *net.UDPAddr) error {
 }
 
 // DiscoverTransponders broadcasts a discovery packet and listens for responses on the passed bindAddr
-func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddr *net.UDPAddr) ([]*Remote, error) {
+func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddrs []*net.UDPAddr) ([]*Remote, error) {
 	found := make([]*Remote, 0)
 	remotes := make(chan *Remote, 10)
 
@@ -95,12 +95,15 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddr *n
 	}
 
 	// send the discovery packet
-	err = sendDiscoveryPacket(dstAddr)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"err": err,
-		}).Error("error sending discovery packet")
-		return found, err
+	for _, addr := range dstAddrs {
+		err = sendDiscoveryPacket(addr)
+		if err != nil {
+			log.WithFields(log.Fields{
+				"err":  err,
+				"addr": addr,
+			}).Error("error sending discovery packet")
+			return found, err
+		}
 	}
 
 	// setup a routine to loop over all responses received by the listener
@@ -148,13 +151,14 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddr *n
 				continue
 			}
 
-			tr := v1.TransponderResponse{}
+			tr := v1alpha1.TransponderResponse{}
 			err = xml.Unmarshal(respPacket, &tr)
 			if err != nil {
 				// if we encounter a decoding error, log it, reset the buffer, and loop again
 				log.WithFields(log.Fields{
 					"packet": string(respPacket),
 					"err":    err,
+					"from":   raddr,
 				}).Error("error decoding response packet")
 				respPacket = respPacket[0:0]
 				continue
@@ -164,8 +168,7 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddr *n
 				"model":      tr.Model,
 				"name":       tr.Name,
 				"apiVersion": tr.Control.Version,
-			}).Info("found transponder")
-			// otherwise, just clear the packet buffer
+			}).Debug("found transponder")
 			respPacket = respPacket[0:0]
 
 			remote := NewRemoteFromTransponderResponse(
@@ -182,7 +185,7 @@ func DiscoverTransponders(ctx context.Context, bindAddr *net.UDPAddr, dstAddr *n
 		select {
 		case <-ctx.Done():
 			// if our context is closed, our work is done and we should return results
-			log.Info("discovery context closing")
+			log.Debug("discovery context closing")
 			// close the listener connection, this will cause the receiver loop to exit
 			err := listener.Close()
 			if err != nil {
